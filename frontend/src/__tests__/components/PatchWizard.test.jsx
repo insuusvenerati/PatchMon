@@ -190,6 +190,67 @@ describe("PatchWizard partial-failure handling", () => {
 		});
 	});
 
+	it.each([
+		"Run immediately",
+		"Use host policy",
+	])("applies %s to the whole fleet before queueing updates", async (timing) => {
+		patchingAPI.trigger.mockImplementation(async (hostId) => ({
+			patch_run_id: `run-${hostId}`,
+		}));
+		renderWizard(HOSTS, { initialStep: 0 });
+		await clickAndSettle(
+			screen.getByRole("button", { name: timing, exact: true }),
+		);
+		await clickAndSettle(screen.getByRole("button", { name: "Next" }));
+		await clickAndSettle(screen.getByRole("button", { name: "Next" }));
+		expect(patchingAPI.trigger).not.toHaveBeenCalled();
+		await clickAndSettle(confirmButton());
+		expect(triggeredHosts()).toEqual(["h1", "h2", "h3"]);
+		for (const host of HOSTS) {
+			expect(patchingAPI.trigger).toHaveBeenCalledWith(
+				host.id,
+				"patch_all",
+				null,
+				null,
+				timing === "Run immediately" ? { schedule_override: "immediate" } : {},
+			);
+		}
+	});
+
+	it("queues all selected hosts for approval without releasing updates", async () => {
+		patchingAPI.trigger.mockImplementation(async (hostId) => ({
+			patch_run_id: `pending-${hostId}`,
+		}));
+		const { onSuccess } = renderWizard(HOSTS, { initialStep: 0 });
+		await clickAndSettle(screen.getByRole("button", { name: "Next" }));
+		await clickAndSettle(
+			screen.getByRole("button", { name: /^Submit for approval/ }),
+		);
+		await clickAndSettle(screen.getByRole("button", { name: "Next" }));
+		expect(patchingAPI.trigger).not.toHaveBeenCalled();
+		await clickAndSettle(
+			screen.getByRole("button", { name: "Submit 3 hosts for approval" }),
+		);
+		for (const host of HOSTS) {
+			expect(patchingAPI.trigger).toHaveBeenCalledWith(
+				host.id,
+				"patch_all",
+				null,
+				null,
+				{ pending_approval: true },
+			);
+		}
+		expect(patchingAPI.approveRun).not.toHaveBeenCalled();
+		expect(onSuccess).toHaveBeenCalledWith("approval", {
+			runs: HOSTS.map((host) => ({
+				hostId: host.id,
+				runId: `pending-${host.id}`,
+				immediate: false,
+			})),
+			deferred: false,
+		});
+	});
+
 	it("issues no further requests when every host has already succeeded", async () => {
 		patchingAPI.trigger.mockImplementation(async (hostId) => ({
 			patch_run_id: `run-${hostId}`,

@@ -9,7 +9,18 @@ import {
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Hosts from "../../pages/Hosts";
-import { dashboardAPI } from "../../utils/api";
+import { dashboardAPI, userPreferencesAPI } from "../../utils/api";
+
+const { patchWizard, canManagePatching, hasModule } = vi.hoisted(() => ({
+	patchWizard: vi.fn(() => null),
+	canManagePatching: vi.fn(() => true),
+	hasModule: vi.fn(() => true),
+}));
+
+vi.mock("../../components/PatchWizard", () => ({ default: patchWizard }));
+vi.mock("../../contexts/AuthContext", () => ({
+	useAuth: () => ({ canManagePatching, hasModule }),
+}));
 
 vi.mock("../../utils/api", async (importOriginal) => {
 	const actual = await importOriginal();
@@ -92,6 +103,9 @@ const openFilters = async () => {
 
 beforeEach(() => {
 	dashboardAPI.getHosts.mockClear();
+	patchWizard.mockClear();
+	canManagePatching.mockReturnValue(true);
+	hasModule.mockReturnValue(true);
 	localStorage.clear();
 	vi.stubGlobal(
 		"fetch",
@@ -99,6 +113,230 @@ beforeEach(() => {
 			Promise.resolve({ ok: true, json: () => Promise.resolve({ data: {} }) }),
 		),
 	);
+});
+
+describe("bulk host package updates", () => {
+	const clickBulkText = async (text) => {
+		const button = await screen.findByText(text);
+		await act(async () => fireEvent.click(button));
+	};
+	const fleet = Array.from({ length: 26 }, (_, i) => ({
+		id: `host-${i}`,
+		api_id: `agent-${i}`,
+		friendly_name: `web-${i}`,
+		hostname: `web-${i}.local`,
+		os_type: i === 25 ? "Windows" : "Ubuntu",
+		status: "active",
+		host_group_memberships: [],
+		last_update: new Date().toISOString(),
+	}));
+	let originalImplementation;
+	let originalPreferences;
+	beforeEach(() => {
+		originalImplementation = dashboardAPI.getHosts.getMockImplementation();
+		originalPreferences = userPreferencesAPI.get.getMockImplementation();
+		// Keep these interaction tests focused on selection, not dozens of
+		// unrelated editable cells and their own queries on every host row.
+		userPreferencesAPI.get.mockResolvedValue({
+			data: {
+				hosts_column_config: [
+					"select",
+					"host",
+					"hostname",
+					"ip",
+					"group",
+					"os",
+					"os_version",
+					"agent_version",
+					"auto_update",
+					"ws_status",
+					"integrations",
+					"status",
+					"needs_reboot",
+					"uptime",
+					"updates",
+					"security_updates",
+					"ssg_version",
+					"notes",
+					"last_update",
+					"actions",
+				].map((id, order) => ({
+					id,
+					order,
+					visible: ["select", "host", "hostname"].includes(id),
+				})),
+			},
+		});
+		dashboardAPI.getHosts.mockImplementation(async (params) => {
+			const matching =
+				params.filter === "selected"
+					? fleet.filter((host) => params.selected.split(",").includes(host.id))
+					: fleet;
+			return {
+				data: {
+					items: matching.slice(params.offset, params.offset + params.limit),
+					total: matching.length,
+					limit: params.limit,
+					offset: params.offset,
+				},
+			};
+		});
+	});
+	afterEach(() => {
+		dashboardAPI.getHosts.mockImplementation(originalImplementation);
+		userPreferencesAPI.get.mockImplementation(originalPreferences);
+	});
+
+	it("selects every matching host, including hosts beyond the visible page", async () => {
+		renderAt("/hosts?pageSize=25&search=web&group=g1");
+		await clickBulkText("Select all matching hosts");
+		await screen.findByText("26 hosts selected");
+		expect(dashboardAPI.getHosts).toHaveBeenCalledWith(
+			expect.objectContaining({
+				search: "web",
+				group: "g1",
+				limit: 500,
+				offset: 0,
+			}),
+		);
+	});
+
+	it("preserves selections across pages and locks the wizard to all selected supported hosts", async () => {
+		renderAt("/hosts?pageSize=25");
+		await clickBulkText("Select page");
+		await screen.findByText("25 hosts selected");
+		await act(async () =>
+			fireEvent.click(screen.getByLabelText("Next hosts page")),
+		);
+		await waitFor(() => expect(lastHostsQuery().offset).toBe(25));
+		await act(async () => fireEvent.click(screen.getByText("Update Packages")));
+		await waitFor(() => expect(patchWizard).toHaveBeenCalled());
+		expect(patchWizard.mock.calls.at(-1)[0]).toMatchObject({
+			isOpen: true,
+			mode: "trigger",
+			patchType: "patch_all",
+			lockHosts: true,
+			presetHosts: fleet.slice(0, 25),
+		});
+	});
+
+	it("explicitly skips Windows and removes only successfully submitted hosts", async () => {
+		renderAt("/hosts?pageSize=25");
+		await clickBulkText("Select all matching hosts");
+		await screen.findByText("26 hosts selected");
+		await act(async () => fireEvent.click(screen.getByText("Update Packages")));
+		await screen.findByText(/Skipped 1 Windows host/);
+		await waitFor(() => expect(patchWizard).toHaveBeenCalled());
+		const props = patchWizard.mock.calls.at(-1)[0];
+		expect(props.presetHosts).toHaveLength(25);
+		await act(async () => {
+			props.onSuccess("approval", {
+				runs: [{ hostId: "host-0", runId: "run-0" }],
+				deferred: true,
+			});
+			props.onClose();
+		});
+		await screen.findByText("25 hosts selected");
+		expect(
+			screen.getByText(/1 host submitted for approval/),
+		).toBeInTheDocument();
+		expect(
+			screen.getByText("View update queue", { selector: "a" }),
+		).toHaveAttribute("href", "/patching?tab=runs");
+		expect(location.pathname).toBe("/hosts");
+	});
+
+	it("respects live connection filters when selecting across all pages", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => ({
+				ok: true,
+				json: async () => ({
+					data: Object.fromEntries(
+						fleet.map((host, i) => [host.api_id, { connected: i === 0 }]),
+					),
+				}),
+			})),
+		);
+		renderAt("/hosts?connection=connected");
+		await clickBulkText("Select all matching hosts");
+		await screen.findByText("1 host selected");
+		await act(async () => fireEvent.click(screen.getByText("Update Packages")));
+		await waitFor(() => expect(patchWizard).toHaveBeenCalled());
+		expect(patchWizard.mock.calls.at(-1)[0].presetHosts).toEqual([fleet[0]]);
+	});
+
+	it("does not open a wizard if selected-host retrieval fails", async () => {
+		renderAt("/hosts?pageSize=25");
+		await clickBulkText("Select page");
+		await screen.findByText("25 hosts selected");
+		dashboardAPI.getHosts.mockRejectedValueOnce(new Error("Connection lost"));
+		await act(async () => fireEvent.click(screen.getByText("Update Packages")));
+		await screen.findByText("Connection lost");
+		expect(patchWizard).not.toHaveBeenCalled();
+		expect(screen.getByText("25 hosts selected")).toBeInTheDocument();
+	});
+
+	it("discards an in-flight select-all when the selection is cleared", async () => {
+		renderAt("/hosts?pageSize=25");
+		await clickBulkText("Select page");
+		await screen.findByText("25 hosts selected");
+		let resolve;
+		dashboardAPI.getHosts.mockImplementationOnce(
+			() =>
+				new Promise((done) => {
+					resolve = done;
+				}),
+		);
+		await act(async () =>
+			fireEvent.click(screen.getByText("Select all matching hosts")),
+		);
+		await act(async () => fireEvent.click(screen.getByText("Clear Selection")));
+		await act(async () =>
+			resolve({ data: { items: fleet, total: fleet.length } }),
+		);
+		expect(screen.queryByText("26 hosts selected")).not.toBeInTheDocument();
+		expect(screen.queryByText("Update Packages")).not.toBeInTheDocument();
+	});
+
+	it("discards an in-flight select-all when the filter changes", async () => {
+		renderAt("/hosts?pageSize=25");
+		await screen.findByText("Select all matching hosts");
+		let resolve;
+		dashboardAPI.getHosts.mockImplementationOnce(
+			() =>
+				new Promise((done) => {
+					resolve = done;
+				}),
+		);
+		await clickBulkText("Select all matching hosts");
+		await act(async () => navigate("/hosts?search=database"));
+		await act(async () =>
+			resolve({ data: { items: fleet, total: fleet.length } }),
+		);
+		expect(screen.queryByText("26 hosts selected")).not.toBeInTheDocument();
+		expect(patchWizard).not.toHaveBeenCalled();
+	});
+
+	it("does not open an empty wizard when only Windows hosts are selected", async () => {
+		renderAt("/hosts?filter=selected&selected=host-25");
+		await clickBulkText("Update Packages");
+		await screen.findByText(/Skipped 1 Windows host/);
+		expect(patchWizard).not.toHaveBeenCalled();
+		expect(screen.getByText("1 host selected")).toBeInTheDocument();
+	});
+
+	it.each([
+		"permission",
+		"module",
+	])("hides package updates without the required %s", async (restriction) => {
+		if (restriction === "permission") canManagePatching.mockReturnValue(false);
+		else hasModule.mockReturnValue(false);
+		renderAt("/hosts?pageSize=25");
+		await clickBulkText("Select page");
+		await screen.findByText("25 hosts selected");
+		expect(screen.queryByText("Update Packages")).not.toBeInTheDocument();
+	});
 });
 
 afterEach(() => {

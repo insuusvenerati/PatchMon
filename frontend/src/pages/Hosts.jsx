@@ -34,6 +34,7 @@ import {
 	Trash2,
 	Wifi,
 	WifiOff,
+	Wrench,
 	X,
 } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
@@ -43,8 +44,10 @@ import HostStatusPills from "../components/HostStatusPills";
 import InlineEdit from "../components/InlineEdit";
 import InlineMultiGroupEdit from "../components/InlineMultiGroupEdit";
 import InlineToggle from "../components/InlineToggle";
+import PatchWizard from "../components/PatchWizard";
 import ModalPortal from "../components/ui/ModalPortal";
 import Tooltip from "../components/ui/Tooltip";
+import { useAuth } from "../contexts/AuthContext";
 import {
 	HOSTS_SORT_FIELDS,
 	useHostsUrlFilters,
@@ -61,6 +64,7 @@ import {
 	settingsAPI,
 	userPreferencesAPI,
 } from "../utils/api";
+import { fetchAllMatchingHosts, fetchSelectedHosts } from "../utils/bulkHosts";
 import { deriveReportingState } from "../utils/hostStatus";
 import { getOSDisplayName, OSIcon } from "../utils/osIcons.jsx";
 import { invalidateHostScope } from "../utils/queryScopes";
@@ -115,6 +119,8 @@ const fetchWsStatusBatches = async (apiIds) => {
 };
 
 const Hosts = () => {
+	const { canManagePatching, hasModule } = useAuth();
+	const canPatch = canManagePatching() && hasModule("patching");
 	const hostGroupFilterId = useId();
 	const statusFilterId = useId();
 	const connectionFilterId = useId();
@@ -122,6 +128,10 @@ const Hosts = () => {
 	const osVersionFilterId = useId();
 	const [showAddModal, setShowAddModal] = useState(false);
 	const [selectedHosts, setSelectedHosts] = useState([]);
+	const [bulkHostsPending, setBulkHostsPending] = useState(false);
+	const [bulkPatchHosts, setBulkPatchHosts] = useState(null);
+	const [bulkPatchMessage, setBulkPatchMessage] = useState(null);
+	const bulkRequestRef = useRef(0);
 	// O(1) `.has()` lookup for the per-row "is this host selected?" check
 	// inside the table's row map. Without this, `selectedHosts.includes(id)`
 	// for every row × every selection is O(n²) — at 1k hosts that's a
@@ -484,10 +494,18 @@ const Hosts = () => {
 	});
 	const previousPaginationResetSignature = useRef(paginationResetSignature);
 	useEffect(() => {
+		return () => {
+			bulkRequestRef.current += 1;
+		};
+	}, []);
+	useEffect(() => {
 		if (previousPaginationResetSignature.current === paginationResetSignature) {
 			return;
 		}
 		previousPaginationResetSignature.current = paginationResetSignature;
+		// A response for an old filter must not select hosts behind the user's back.
+		bulkRequestRef.current += 1;
+		setBulkHostsPending(false);
 		if (page === 1) return;
 		const next = new URLSearchParams(searchParams);
 		next.set("page", "1");
@@ -781,7 +799,18 @@ const Hosts = () => {
 	});
 
 	// Helper functions for bulk selection
+	const cancelBulkHostLoad = () => {
+		bulkRequestRef.current += 1;
+		setBulkHostsPending(false);
+	};
+
+	const clearSelection = () => {
+		cancelBulkHostLoad();
+		setSelectedHosts([]);
+	};
+
 	const handleSelectHost = (hostId) => {
+		cancelBulkHostLoad();
 		setSelectedHosts((prev) =>
 			prev.includes(hostId)
 				? prev.filter((id) => id !== hostId)
@@ -790,6 +819,7 @@ const Hosts = () => {
 	};
 
 	const handleSelectAll = (hostsToSelect) => {
+		cancelBulkHostLoad();
 		const hostIdsToSelect = hostsToSelect.map((host) => host.id);
 		const allSelected = hostIdsToSelect.every((id) =>
 			selectedHosts.includes(id),
@@ -1105,6 +1135,97 @@ const Hosts = () => {
 	const liveFilterTruncated =
 		liveFilterActive && serverTotalHosts > LIVE_FILTER_FETCH_LIMIT;
 
+	const handleSelectAllMatching = async () => {
+		const request = ++bulkRequestRef.current;
+		setBulkHostsPending(true);
+		setBulkPatchMessage(null);
+		try {
+			let matching = await fetchAllMatchingHosts(hostsQueryParams);
+			if (liveFilterActive) {
+				const statusMap = await fetchWsStatusBatches(
+					matching.filter((host) => host.api_id).map((host) => host.api_id),
+				);
+				matching = matching.filter((host) => {
+					const entry = statusMap[host.api_id];
+					const connected = entry === undefined || entry?.connected === true;
+					return (
+						(!connectionFilterActive ||
+							connected === (connectionFilter === "connected")) &&
+						(!reportingFilterActive ||
+							deriveReportingState(host, connected, updateIntervalMinutes) ===
+								statusFilter)
+					);
+				});
+			}
+			if (request !== bulkRequestRef.current) return;
+			// Replace rather than merge: "all matching" must not include hidden
+			// selections from another filter.
+			setSelectedHosts(matching.map((host) => host.id));
+			setBulkPatchMessage({
+				type: "success",
+				text: `Selected all ${matching.length} matching hosts across all pages.`,
+			});
+		} catch (error) {
+			if (request !== bulkRequestRef.current) return;
+			setBulkPatchMessage({
+				type: "error",
+				text:
+					error.response?.data?.error ||
+					error.message ||
+					"Failed to select hosts",
+			});
+		} finally {
+			if (request === bulkRequestRef.current) setBulkHostsPending(false);
+		}
+	};
+
+	const handleBulkPatch = async () => {
+		if (!canPatch || selectedHosts.length === 0) return;
+		const request = ++bulkRequestRef.current;
+		setBulkHostsPending(true);
+		setBulkPatchMessage(null);
+		try {
+			const selected = await fetchSelectedHosts(selectedHosts);
+			if (request !== bulkRequestRef.current) return;
+			const supported = selected.filter(
+				(host) => !(host.os_type || "").toLowerCase().includes("windows"),
+			);
+			const skipped = selected.length - supported.length;
+			if (skipped > 0) {
+				setBulkPatchMessage({
+					type: "warning",
+					text: `Skipped ${skipped} Windows host${skipped !== 1 ? "s" : ""}. Use Windows Update or WinGet on those hosts.`,
+				});
+			}
+			if (supported.length > 0) setBulkPatchHosts(supported);
+		} catch (error) {
+			if (request !== bulkRequestRef.current) return;
+			setBulkPatchMessage({
+				type: "error",
+				text:
+					error.response?.data?.error ||
+					error.message ||
+					"Failed to load selected hosts",
+			});
+		} finally {
+			if (request === bulkRequestRef.current) setBulkHostsPending(false);
+		}
+	};
+
+	const handleBulkPatchSuccess = (mode, info) => {
+		const runs = info?.runs || [];
+		const successfulIds = new Set(runs.map((run) => run.hostId));
+		setSelectedHosts((prev) => prev.filter((id) => !successfulIds.has(id)));
+		invalidateHostScope(queryClient);
+		queryClient.invalidateQueries({ queryKey: ["patching-runs"] });
+		queryClient.invalidateQueries({ queryKey: ["patching-dashboard"] });
+		setBulkPatchMessage({
+			type: "success",
+			text: `${runs.length} host${runs.length !== 1 ? "s" : ""} ${mode === "approval" ? "submitted for approval" : "queued for package updates"}.`,
+			showQueue: true,
+		});
+	};
+
 	// Clamp out-of-range deep links (`?page=999`) and pages that empty out after
 	// a delete, but only once the totals are known so a legitimate deep link is
 	// not stamped down to page 1 during the first fetch.
@@ -1309,6 +1430,8 @@ const Hosts = () => {
 					<button
 						type="button"
 						onClick={() => handleSelectHost(host.id)}
+						aria-label={`Select host ${host.friendly_name || host.hostname || host.id}`}
+						aria-pressed={selectedHostsSet.has(host.id)}
 						className="flex items-center gap-2 hover:text-secondary-700"
 					>
 						{selectedHostsSet.has(host.id) ? (
@@ -1856,7 +1979,47 @@ const Hosts = () => {
 			{/* Hosts List */}
 			<div className="card flex-1 flex flex-col md:overflow-hidden min-h-0">
 				<div className="px-4 py-4 sm:p-4 flex-1 flex flex-col md:overflow-hidden min-h-0">
+					{bulkPatchMessage && (
+						<div
+							role={bulkPatchMessage.type === "success" ? "status" : "alert"}
+							className="mb-3 text-sm text-secondary-700 dark:text-secondary-200"
+						>
+							{bulkPatchMessage.text}{" "}
+							{bulkPatchMessage.showQueue && (
+								<Link
+									to="/patching?tab=runs"
+									className="text-primary-600 dark:text-primary-400 hover:underline"
+								>
+									View update queue
+								</Link>
+							)}
+						</div>
+					)}
 					<div className="flex flex-col sm:flex-row sm:items-center sm:justify-end gap-3 mb-4">
+						<div className="flex flex-wrap items-center gap-2 sm:mr-auto">
+							<button
+								type="button"
+								onClick={() => handleSelectAll(visibleHosts)}
+								disabled={visibleHosts.length === 0}
+								aria-pressed={
+									visibleHosts.length > 0 &&
+									visibleHosts.every((host) => selectedHostsSet.has(host.id))
+								}
+								className="btn-outline min-h-[44px] text-sm"
+							>
+								Select page
+							</button>
+							<button
+								type="button"
+								onClick={handleSelectAllMatching}
+								disabled={bulkHostsPending || isLoading}
+								className="btn-outline min-h-[44px] text-sm"
+							>
+								{bulkHostsPending
+									? "Loading hosts…"
+									: "Select all matching hosts"}
+							</button>
+						</div>
 						{bulkFetchReportMessage.text && (
 							<div
 								className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm ${
@@ -1879,6 +2042,18 @@ const Hosts = () => {
 									{selectedHosts.length} host
 									{selectedHosts.length !== 1 ? "s" : ""} selected
 								</span>
+								{canPatch && (
+									<button
+										type="button"
+										onClick={handleBulkPatch}
+										disabled={bulkHostsPending}
+										className="btn-primary flex items-center gap-2 px-3 py-2 min-h-[44px] text-sm"
+										title="Update all packages on selected hosts now, by policy, or submit for approval"
+									>
+										<Wrench className="h-4 w-4" />
+										Update Packages
+									</button>
+								)}
 								<button
 									type="button"
 									onClick={handleBulkFetchReport}
@@ -1913,7 +2088,7 @@ const Hosts = () => {
 								</button>
 								<button
 									type="button"
-									onClick={() => setSelectedHosts([])}
+									onClick={clearSelection}
 									className="text-xs sm:text-sm text-secondary-500 dark:text-white/70 hover:text-secondary-700 dark:hover:text-white/90 min-h-[44px] px-2"
 								>
 									<span className="hidden sm:inline">Clear Selection</span>
@@ -2207,6 +2382,8 @@ const Hosts = () => {
 																				onClick={() =>
 																					handleSelectHost(host.id)
 																				}
+																				aria-label={`Select host ${host.friendly_name || host.hostname || host.id}`}
+																				aria-pressed={isSelected}
 																				className="flex-shrink-0 min-w-[44px] min-h-[44px] flex items-center justify-center"
 																			>
 																				{isSelected ? (
@@ -2363,6 +2540,10 @@ const Hosts = () => {
 																				onClick={() =>
 																					handleSelectAll(groupHosts)
 																				}
+																				aria-label="Select hosts in this group"
+																				aria-pressed={groupHosts.every((host) =>
+																					selectedHostsSet.has(host.id),
+																				)}
 																				className="flex items-center gap-2 hover:text-secondary-700"
 																			>
 																				{groupHosts.every((host) =>
@@ -2623,6 +2804,17 @@ const Hosts = () => {
 			</div>
 
 			{/* Modals */}
+			{canPatch && bulkPatchHosts && (
+				<PatchWizard
+					isOpen
+					mode="trigger"
+					patchType="patch_all"
+					lockHosts
+					presetHosts={bulkPatchHosts}
+					onClose={() => setBulkPatchHosts(null)}
+					onSuccess={handleBulkPatchSuccess}
+				/>
+			)}
 			<AddHostWizard
 				isOpen={showAddModal}
 				onClose={() => setShowAddModal(false)}
