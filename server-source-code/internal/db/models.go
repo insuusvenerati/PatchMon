@@ -628,6 +628,8 @@ type Setting struct {
 	AiProvider                      string           `json:"ai_provider"`
 	AiModel                         *string          `json:"ai_model"`
 	AiApiKey                        *string          `json:"ai_api_key"`
+	AiCliPreset                     string           `json:"ai_cli_preset"`
+	AiCliCommand                    *string          `json:"ai_cli_command"`
 	AlertsEnabled                   bool             `json:"alerts_enabled"`
 	DiscordOauthEnabled             bool             `json:"discord_oauth_enabled"`
 	DiscordClientID                 *string          `json:"discord_client_id"`

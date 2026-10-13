@@ -4423,13 +4423,13 @@ Server logs include `rdp-ticket` and `rdp session opened` lines with the session
 
 The **AI Terminal Assistant** is an optional chat panel inside PatchMon's [Web SSH Terminal](#web-ssh-terminal). Operators open it alongside the terminal to ask questions about what they are seeing ("why did `apt` fail?", "how do I restart this service?", "explain this stack trace") and get answers from an LLM of their choice. The assistant can also turn code snippets in its replies into paste-to-terminal actions, so you stay inside a single window.
 
-The assistant uses PatchMon as a proxy to a supported third-party AI provider (OpenRouter, Anthropic, OpenAI, or Google Gemini). The provider, model, and API key are configured once at the system level; individual operators don't have to set anything up.
+The assistant normally uses PatchMon as a proxy to a supported third-party AI provider (OpenRouter, Anthropic, OpenAI, or Google Gemini). As an alternative it can hand requests to a **locally installed CLI agent** (for example OpenAI's `codex` or Google's Antigravity `agy`) running on the PatchMon server host. The provider, model, and API key — or the CLI command — are configured once at the system level; individual operators don't have to set anything up.
 
 Web SSH shipped in 1.4.0, and the AI assistant in the same release.
 
 ### Supported providers
 
-Four providers are supported in 2.0, each with a curated list of models:
+Four hosted providers are supported in 2.0, each with a curated list of models. A fifth option, **Local CLI**, runs a command-line agent on the PatchMon host instead of calling an API:
 
 | Provider | Default model | Additional models |
 |----------|---------------|-------------------|
@@ -4486,6 +4486,22 @@ Click **Test Connection**. The server sends a one-sentence round-trip to the con
 
 Flip the **Enable AI Assistant** toggle at the top of the page. Until this is on, the chat panel inside the SSH terminal is hidden for everyone.
 
+### Using a local CLI agent
+
+Instead of a hosted API, choose **Local CLI** in the **Provider** dropdown. No API key is needed: the PatchMon server executes a command-line program and uses its standard output as the assistant's reply.
+
+1. **Pick the agent.** The **CLI** dropdown offers built-in presets:
+   - **OpenAI Codex CLI** — runs `codex exec --skip-git-repo-check -`, passing the prompt on stdin.
+   - **Google Antigravity CLI (agy)** — runs `agy -p <question>`.
+   - **Custom command** — any command you like.
+2. **Edit the command if needed.** The **Command** box holds the exact command to run. Include `{{prompt}}` where the question should be substituted; if you omit the placeholder, the prompt is piped to the process on stdin. For example, `codex exec --skip-git-repo-check {{prompt}}` or `agy -p {{prompt}}`.
+3. **Test Connection** runs the command once and shows what comes back.
+4. **Enable the assistant** as usual.
+
+The CLI runs with the PatchMon server's user account and working directory, is subject to a 2-minute timeout, and its output is capped before being returned to the browser. Install and sign in to the agent on the **server host** first (a headless login; see each tool's own documentation). Only users with `can_manage_settings` can change the command, but the setting ultimately runs a program on the server, so treat it like any other privileged configuration.
+
+> **Command completion is not available with the local CLI provider.** Agentic CLIs are far too slow for per-keystroke suggestions, so PatchMon returns no completion and the assistant chat still works normally.
+
 ### Using the assistant in a terminal
 
 1. Open a web SSH terminal to any host (see [Web SSH Terminal](#web-ssh-terminal)).
@@ -4518,6 +4534,7 @@ Command-completion requests (when you pause while typing into the terminal, if c
 #### Privacy considerations
 
 - Terminal output you capture in the buffer **is** sent to the third-party provider as context. If you've just run a command that shows sensitive data (API keys, secrets, customer data), clear the terminal or don't ask the assistant about it.
+- With the **Local CLI** provider the same terminal context is passed to the local CLI process instead of a hosted API. The CLI may in turn send it to its own backend, so review that tool's data handling with the same care.
 - Your provider's terms of service govern what they may do with the request. Review the provider's data-processing policy before enabling on production hosts. OpenRouter, Anthropic, OpenAI, and Gemini all publish policies.
 - API key secrecy: keys are encrypted at rest and never echoed back over the API. Admins with database access could still read the encrypted value; rotate `SESSION_SECRET` carefully.
 - All provider traffic leaves the PatchMon server over HTTPS directly to the provider's endpoint. PatchMon does not route it through any intermediate service.
@@ -4548,19 +4565,23 @@ These values match the product defaults in `internal/ai/service.go` and are not 
 
 - **Per-deployment**: the admin toggle in **Settings → AI Terminal Assistant**. Off = panel is hidden for everyone.
 - **Per-user** (soft): any user can simply keep the panel closed. There is no per-user opt-out flag.
-- **Emergency off**: clear the API key in **Settings → AI Terminal Assistant**. The server-side AI endpoints return `400 AI API key not configured` and the panel surfaces that error.
+- **Emergency off**: clear the API key in **Settings → AI Terminal Assistant**. The server-side AI endpoints return `400 AI API key not configured` and the panel surfaces that error. With the **Local CLI** provider, clear the command instead; the endpoints return `local CLI command not configured`.
 
 ### Troubleshooting
 
 | Symptom | Likely cause |
 |---------|-------------|
-| AI panel does not appear in the terminal | AI module not included in your subscription, or AI not enabled in settings, or no API key set. |
+| AI panel does not appear in the terminal | AI module not included in your subscription, or AI not enabled in settings, or no provider credential configured (API key, or a Local CLI command). |
 | *"AI assistant is not enabled"* in the panel | Toggle is off in settings. |
 | *"AI API key not configured"* | Key field is empty or decryption failed. Re-enter the key. |
 | *"Rate limit exceeded. Please wait a moment."* | 30 requests/minute cap hit for your user. Back off and retry. |
 | Test connection fails with `401` from provider | API key is wrong or revoked. Re-issue and re-enter. |
 | Test connection fails with `404 model not found` | The model listed in PatchMon is not available on your account. Switch to a different model in the dropdown. |
 | Replies are truncated mid-sentence | Response hit the 1024-token cap. Ask a narrower follow-up or paste a smaller context. |
+| *"local CLI command not configured"* | Provider is **Local CLI** but the command is empty. Pick a preset or enter a command. |
+| *"local CLI failed"* / *"executable not found"* | The binary is missing, not on the server's `PATH`, not signed in, or the flags are wrong. Run **Test Connection** and check the server logs. |
+| *"local CLI timed out"* | The agent took longer than 2 minutes. Simplify the question or check the agent on the server host. |
+| Command completion never suggests anything | Completion is disabled for the **Local CLI** provider by design; use a hosted provider if you need it. |
 
 ### Related pages
 

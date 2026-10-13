@@ -137,6 +137,8 @@ type Settings struct {
 	AiProvider                      string     `db:"ai_provider"`
 	AiModel                         *string    `db:"ai_model"`
 	AiAPIKey                        *string    `db:"ai_api_key"`
+	AiCLIPreset                     string     `db:"ai_cli_preset"`
+	AiCLICommand                    *string    `db:"ai_cli_command"`
 	AlertsEnabled                   bool       `db:"alerts_enabled"`
 	DiscordOAuthEnabled             bool       `db:"discord_oauth_enabled"`
 	DiscordClientID                 *string    `db:"discord_client_id"`

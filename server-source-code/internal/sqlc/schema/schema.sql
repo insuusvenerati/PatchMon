@@ -70,6 +70,8 @@ CREATE TABLE IF NOT EXISTS settings (
     ai_provider TEXT NOT NULL DEFAULT 'openrouter',
     ai_model TEXT,
     ai_api_key TEXT,
+    ai_cli_preset TEXT NOT NULL DEFAULT 'codex',
+    ai_cli_command TEXT,
     alerts_enabled BOOLEAN NOT NULL DEFAULT true,
     discord_oauth_enabled BOOLEAN NOT NULL DEFAULT false,
     discord_client_id TEXT,

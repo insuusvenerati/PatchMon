@@ -136,7 +136,8 @@ const SshTerminal = ({ host, isOpen, onClose, embedded = false }) => {
 		staleTime: 60000, // Cache for 1 minute
 	});
 
-	const aiEnabled = aiStatus?.ai_enabled && aiStatus?.ai_api_key_set;
+	const aiEnabled =
+		aiStatus?.ai_enabled && (aiStatus?.ai_ready ?? aiStatus?.ai_api_key_set);
 
 	// Get recent terminal output for AI context
 	const getTerminalContext = useCallback(() => {
