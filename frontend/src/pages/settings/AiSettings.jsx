@@ -10,7 +10,7 @@ import {
 	Sparkles,
 	X,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { aiAPI } from "../../utils/api";
 
 const AiSettings = () => {
@@ -18,6 +18,8 @@ const AiSettings = () => {
 	const [showApiKey, setShowApiKey] = useState(false);
 	const [apiKeyInput, setApiKeyInput] = useState("");
 	const [testResult, setTestResult] = useState(null);
+	const [cliCommand, setCliCommand] = useState("");
+	const [cliDirty, setCliDirty] = useState(false);
 
 	// Fetch AI settings
 	const { data: settings, isLoading: settingsLoading } = useQuery({
@@ -32,6 +34,31 @@ const AiSettings = () => {
 	});
 
 	const providers = providersData?.providers || [];
+	const cliPresets = providersData?.cli_presets || [];
+
+	const isCli = settings?.ai_provider === "cli";
+	const selectedProvider = providers.find(
+		(p) => p.id === settings?.ai_provider,
+	);
+	const selectedCliPreset = cliPresets.find(
+		(p) => p.id === settings?.ai_cli_preset,
+	);
+	const effectiveCliCommand =
+		settings?.ai_cli_command_effective ||
+		settings?.ai_cli_command ||
+		selectedCliPreset?.command ||
+		"";
+	const canTest = isCli
+		? Boolean(effectiveCliCommand)
+		: Boolean(settings?.ai_api_key_set);
+
+	// Hydrate the command field from the server, but never clobber in-progress
+	// edits when a background refetch lands.
+	useEffect(() => {
+		if (!cliDirty) {
+			setCliCommand(effectiveCliCommand);
+		}
+	}, [effectiveCliCommand, cliDirty]);
 
 	// Update settings mutation
 	const updateMutation = useMutation({
@@ -39,6 +66,7 @@ const AiSettings = () => {
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["aiSettings"] });
 			setApiKeyInput("");
+			setCliDirty(false);
 		},
 	});
 
@@ -79,9 +107,18 @@ const AiSettings = () => {
 		}
 	};
 
-	const selectedProvider = providers.find(
-		(p) => p.id === settings?.ai_provider,
-	);
+	const handleCliPresetChange = (e) => {
+		const preset = cliPresets.find((p) => p.id === e.target.value);
+		setCliDirty(false);
+		updateMutation.mutate({
+			ai_cli_preset: e.target.value,
+			ai_cli_command: preset?.command || "",
+		});
+	};
+
+	const handleSaveCliCommand = () => {
+		updateMutation.mutate({ ai_cli_command: cliCommand.trim() });
+	};
 
 	if (settingsLoading) {
 		return (
@@ -109,7 +146,7 @@ const AiSettings = () => {
 			</div>
 
 			{/* API Key Invalid Warning */}
-			{settings?.ai_api_key_invalid && (
+			{!isCli && settings?.ai_api_key_invalid && (
 				<div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-4">
 					<div className="flex items-start gap-3">
 						<AlertTriangle className="h-5 w-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
@@ -200,134 +237,217 @@ const AiSettings = () => {
 								"Direct access to OpenAI GPT models"}
 							{settings?.ai_provider === "gemini" &&
 								"Direct access to Google Gemini models"}
+							{isCli &&
+								"Run a locally installed CLI agent (Codex, agy, or a custom command)"}
 						</p>
 					</div>
+
+					{/* Local CLI Configuration */}
+					{isCli && (
+						<div className="space-y-4">
+							<div>
+								<label
+									htmlFor="ai-cli-preset"
+									className="block text-sm font-medium text-secondary-700 dark:text-white mb-1"
+								>
+									CLI
+								</label>
+								<select
+									id="ai-cli-preset"
+									value={settings?.ai_cli_preset || "codex"}
+									onChange={handleCliPresetChange}
+									disabled={updateMutation.isPending}
+									className="w-full px-3 py-2 bg-white dark:bg-secondary-900 border border-secondary-300 dark:border-secondary-600 rounded-md text-secondary-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+								>
+									{cliPresets.map((preset) => (
+										<option key={preset.id} value={preset.id}>
+											{preset.name}
+										</option>
+									))}
+								</select>
+								{selectedCliPreset?.hint && (
+									<p className="mt-1 text-xs text-secondary-500 dark:text-white">
+										{selectedCliPreset.hint}
+									</p>
+								)}
+							</div>
+
+							<div>
+								<label
+									htmlFor="ai-cli-command"
+									className="block text-sm font-medium text-secondary-700 dark:text-white mb-1"
+								>
+									Command
+								</label>
+								<div className="flex gap-2">
+									<input
+										id="ai-cli-command"
+										type="text"
+										value={cliCommand}
+										onChange={(e) => {
+											setCliCommand(e.target.value);
+											setCliDirty(true);
+										}}
+										placeholder="codex exec --skip-git-repo-check -"
+										className="w-full px-3 py-2 font-mono text-sm bg-white dark:bg-secondary-900 border border-secondary-300 dark:border-secondary-600 rounded-md text-secondary-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+									/>
+									<button
+										type="button"
+										onClick={handleSaveCliCommand}
+										disabled={updateMutation.isPending}
+										className="px-4 py-2 bg-primary-600 text-white rounded-md hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+									>
+										{updateMutation.isPending ? (
+											<Loader2 className="h-4 w-4 animate-spin" />
+										) : (
+											<Check className="h-4 w-4" />
+										)}
+										Save
+									</button>
+								</div>
+								<p className="mt-1 text-xs text-secondary-500 dark:text-white">
+									Runs on the PatchMon server host. Include{" "}
+									<code className="bg-secondary-100 dark:bg-secondary-900 px-1 rounded">
+										{"{{prompt}}"}
+									</code>{" "}
+									where the question goes, or omit it to pipe the prompt on
+									stdin.
+								</p>
+							</div>
+						</div>
+					)}
 
 					{/* Model Selection */}
-					<div>
-						<label
-							htmlFor="ai-model"
-							className="block text-sm font-medium text-secondary-700 dark:text-white mb-1"
-						>
-							Model
-						</label>
-						<select
-							id="ai-model"
-							value={settings?.ai_model || selectedProvider?.defaultModel || ""}
-							onChange={handleModelChange}
-							disabled={updateMutation.isPending}
-							className="w-full px-3 py-2 bg-white dark:bg-secondary-900 border border-secondary-300 dark:border-secondary-600 rounded-md text-secondary-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-						>
-							{selectedProvider?.models.map((model) => (
-								<option key={model.id} value={model.id}>
-									{model.name}
-								</option>
-							))}
-						</select>
-					</div>
-
-					{/* API Key Input */}
-					<div>
-						<label
-							htmlFor="ai-api-key"
-							className="block text-sm font-medium text-secondary-700 dark:text-white mb-1"
-						>
-							API Key
-						</label>
-						<div className="flex gap-2">
-							<div className="relative flex-1">
-								<input
-									id="ai-api-key"
-									type={showApiKey ? "text" : "password"}
-									value={apiKeyInput}
-									onChange={(e) => setApiKeyInput(e.target.value)}
-									placeholder={
-										settings?.ai_api_key_set
-											? "••••••••••••••••"
-											: "Enter your API key"
+					{!isCli && (
+						<>
+							<div>
+								<label
+									htmlFor="ai-model"
+									className="block text-sm font-medium text-secondary-700 dark:text-white mb-1"
+								>
+									Model
+								</label>
+								<select
+									id="ai-model"
+									value={
+										settings?.ai_model || selectedProvider?.defaultModel || ""
 									}
-									className="w-full px-3 py-2 pr-10 bg-white dark:bg-secondary-900 border border-secondary-300 dark:border-secondary-600 rounded-md text-secondary-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-								/>
-								<button
-									type="button"
-									onClick={() => setShowApiKey(!showApiKey)}
-									className="absolute right-2 top-1/2 -translate-y-1/2 text-secondary-400 hover:text-secondary-600 dark:hover:text-secondary-300"
+									onChange={handleModelChange}
+									disabled={updateMutation.isPending}
+									className="w-full px-3 py-2 bg-white dark:bg-secondary-900 border border-secondary-300 dark:border-secondary-600 rounded-md text-secondary-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
 								>
-									{showApiKey ? (
-										<EyeOff className="h-4 w-4" />
-									) : (
-										<Eye className="h-4 w-4" />
-									)}
-								</button>
+									{selectedProvider?.models.map((model) => (
+										<option key={model.id} value={model.id}>
+											{model.name}
+										</option>
+									))}
+								</select>
 							</div>
-							<button
-								type="button"
-								onClick={handleSaveApiKey}
-								disabled={!apiKeyInput.trim() || updateMutation.isPending}
-								className="px-4 py-2 bg-primary-600 text-white rounded-md hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-							>
-								{updateMutation.isPending ? (
-									<Loader2 className="h-4 w-4 animate-spin" />
-								) : (
-									<Check className="h-4 w-4" />
+
+							{/* API Key Input */}
+							<div>
+								<label
+									htmlFor="ai-api-key"
+									className="block text-sm font-medium text-secondary-700 dark:text-white mb-1"
+								>
+									API Key
+								</label>
+								<div className="flex gap-2">
+									<div className="relative flex-1">
+										<input
+											id="ai-api-key"
+											type={showApiKey ? "text" : "password"}
+											value={apiKeyInput}
+											onChange={(e) => setApiKeyInput(e.target.value)}
+											placeholder={
+												settings?.ai_api_key_set
+													? "••••••••••••••••"
+													: "Enter your API key"
+											}
+											className="w-full px-3 py-2 pr-10 bg-white dark:bg-secondary-900 border border-secondary-300 dark:border-secondary-600 rounded-md text-secondary-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+										/>
+										<button
+											type="button"
+											onClick={() => setShowApiKey(!showApiKey)}
+											className="absolute right-2 top-1/2 -translate-y-1/2 text-secondary-400 hover:text-secondary-600 dark:hover:text-secondary-300"
+										>
+											{showApiKey ? (
+												<EyeOff className="h-4 w-4" />
+											) : (
+												<Eye className="h-4 w-4" />
+											)}
+										</button>
+									</div>
+									<button
+										type="button"
+										onClick={handleSaveApiKey}
+										disabled={!apiKeyInput.trim() || updateMutation.isPending}
+										className="px-4 py-2 bg-primary-600 text-white rounded-md hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+									>
+										{updateMutation.isPending ? (
+											<Loader2 className="h-4 w-4 animate-spin" />
+										) : (
+											<Check className="h-4 w-4" />
+										)}
+										Save
+									</button>
+								</div>
+								{settings?.ai_api_key_set && !settings?.ai_api_key_invalid && (
+									<p className="mt-1 text-xs text-green-600 dark:text-green-400">
+										API key is configured
+									</p>
 								)}
-								Save
-							</button>
-						</div>
-						{settings?.ai_api_key_set && !settings?.ai_api_key_invalid && (
-							<p className="mt-1 text-xs text-green-600 dark:text-green-400">
-								API key is configured
-							</p>
-						)}
-						{settings?.ai_api_key_invalid && (
-							<p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
-								API key needs to be re-entered (encryption key changed)
-							</p>
-						)}
-						<p className="mt-1 text-xs text-secondary-500 dark:text-white">
-							Get your API key from:{" "}
-							{settings?.ai_provider === "openrouter" && (
-								<a
-									href="https://openrouter.ai/keys"
-									target="_blank"
-									rel="noopener noreferrer"
-									className="text-primary-600 hover:underline"
-								>
-									openrouter.ai/keys
-								</a>
-							)}
-							{settings?.ai_provider === "anthropic" && (
-								<a
-									href="https://console.anthropic.com/settings/keys"
-									target="_blank"
-									rel="noopener noreferrer"
-									className="text-primary-600 hover:underline"
-								>
-									console.anthropic.com
-								</a>
-							)}
-							{settings?.ai_provider === "openai" && (
-								<a
-									href="https://platform.openai.com/api-keys"
-									target="_blank"
-									rel="noopener noreferrer"
-									className="text-primary-600 hover:underline"
-								>
-									platform.openai.com
-								</a>
-							)}
-							{settings?.ai_provider === "gemini" && (
-								<a
-									href="https://aistudio.google.com/apikey"
-									target="_blank"
-									rel="noopener noreferrer"
-									className="text-primary-600 hover:underline"
-								>
-									aistudio.google.com
-								</a>
-							)}
-						</p>
-					</div>
+								{settings?.ai_api_key_invalid && (
+									<p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+										API key needs to be re-entered (encryption key changed)
+									</p>
+								)}
+								<p className="mt-1 text-xs text-secondary-500 dark:text-white">
+									Get your API key from:{" "}
+									{settings?.ai_provider === "openrouter" && (
+										<a
+											href="https://openrouter.ai/keys"
+											target="_blank"
+											rel="noopener noreferrer"
+											className="text-primary-600 hover:underline"
+										>
+											openrouter.ai/keys
+										</a>
+									)}
+									{settings?.ai_provider === "anthropic" && (
+										<a
+											href="https://console.anthropic.com/settings/keys"
+											target="_blank"
+											rel="noopener noreferrer"
+											className="text-primary-600 hover:underline"
+										>
+											console.anthropic.com
+										</a>
+									)}
+									{settings?.ai_provider === "openai" && (
+										<a
+											href="https://platform.openai.com/api-keys"
+											target="_blank"
+											rel="noopener noreferrer"
+											className="text-primary-600 hover:underline"
+										>
+											platform.openai.com
+										</a>
+									)}
+									{settings?.ai_provider === "gemini" && (
+										<a
+											href="https://aistudio.google.com/apikey"
+											target="_blank"
+											rel="noopener noreferrer"
+											className="text-primary-600 hover:underline"
+										>
+											aistudio.google.com
+										</a>
+									)}
+								</p>
+							</div>
+						</>
+					)}
 
 					{/* Test Connection */}
 					<div className="pt-2 border-t border-secondary-200 dark:border-secondary-700">
@@ -337,7 +457,7 @@ const AiSettings = () => {
 								setTestResult(null);
 								testMutation.mutate();
 							}}
-							disabled={!settings?.ai_api_key_set || testMutation.isPending}
+							disabled={!canTest || testMutation.isPending}
 							className="px-4 py-2 bg-secondary-100 dark:bg-secondary-700 text-secondary-700 dark:text-secondary-200 rounded-md hover:bg-secondary-200 dark:hover:bg-secondary-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
 						>
 							{testMutation.isPending ? (
@@ -383,13 +503,25 @@ const AiSettings = () => {
 									terminal output and get help
 								</span>
 							</li>
-							<li className="flex items-center gap-2">
-								<Check className="h-4 w-4 text-green-500" />
-								<span>
-									<strong>Command Completion</strong> - Get AI-powered command
-									suggestions as you type
-								</span>
-							</li>
+							{!isCli && (
+								<li className="flex items-center gap-2">
+									<Check className="h-4 w-4 text-green-500" />
+									<span>
+										<strong>Command Completion</strong> - Get AI-powered command
+										suggestions as you type
+									</span>
+								</li>
+							)}
+							{isCli && (
+								<li className="flex items-center gap-2">
+									<Check className="h-4 w-4 text-green-500" />
+									<span>
+										<strong>Local CLI</strong> - Route the assistant through
+										Codex, agy, or a custom command installed on the PatchMon
+										server (command completion is not available)
+									</span>
+								</li>
+							)}
 							<li className="flex items-center gap-2">
 								<Check className="h-4 w-4 text-green-500" />
 								<span>

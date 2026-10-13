@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/PatchMon/PatchMon/server-source-code/internal/agentregistry"
+	"github.com/PatchMon/PatchMon/server-source-code/internal/ai"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/config"
 	hostctx "github.com/PatchMon/PatchMon/server-source-code/internal/context"
 	"github.com/PatchMon/PatchMon/server-source-code/internal/middleware"
@@ -252,12 +253,18 @@ func (h *SettingsHandler) AIStatus(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		JSON(w, http.StatusOK, map[string]interface{}{
 			"ai_enabled":     false,
+			"ai_provider":    "openrouter",
 			"ai_api_key_set": false,
+			"ai_ready":       false,
 		})
 		return
 	}
+	provider := ai.EffectiveProvider(s.AiProvider)
 	apiKeySet := false
-	if s.AiAPIKey != nil && *s.AiAPIKey != "" {
+	cliReady := false
+	if ai.IsCLIProvider(provider) {
+		cliReady = ai.CLIConfigured(s)
+	} else if s.AiAPIKey != nil && *s.AiAPIKey != "" {
 		if h.enc != nil {
 			_, err := h.enc.Decrypt(*s.AiAPIKey)
 			apiKeySet = err == nil
@@ -265,9 +272,19 @@ func (h *SettingsHandler) AIStatus(w http.ResponseWriter, r *http.Request) {
 			apiKeySet = true
 		}
 	}
+	ready := false
+	if s.AiEnabled {
+		if ai.IsCLIProvider(provider) {
+			ready = cliReady
+		} else {
+			ready = apiKeySet
+		}
+	}
 	JSON(w, http.StatusOK, map[string]interface{}{
 		"ai_enabled":     s.AiEnabled,
+		"ai_provider":    provider,
 		"ai_api_key_set": apiKeySet,
+		"ai_ready":       ready,
 	})
 }
 
@@ -839,6 +856,7 @@ func settingsToResponse(s *models.Settings, enc *util.Encryption) map[string]int
 		"metrics_last_sent":            s.MetricsLastSent,
 		"show_github_version_on_login": s.ShowGithubVersionOnLogin,
 		"ai_enabled":                   s.AiEnabled, "ai_provider": s.AiProvider, "ai_model": s.AiModel,
+		"ai_cli_preset": s.AiCLIPreset, "ai_cli_command": s.AiCLICommand,
 		"alerts_enabled":        s.AlertsEnabled,
 		"discord_oauth_enabled": s.DiscordOAuthEnabled, "discord_client_id": s.DiscordClientID,
 		"discord_client_secret_set": discordSecretSet,
@@ -1088,7 +1106,7 @@ func applySettingsUpdate(s *models.Settings, req map[string]interface{}, enc *ut
 		s.AiEnabled = v
 	}
 	if v, ok := getReqString(req, "ai_provider", "aiProvider"); ok {
-		if v == "openrouter" || v == "anthropic" || v == "openai" || v == "gemini" {
+		if v == "openrouter" || v == "anthropic" || v == "openai" || v == "gemini" || v == ai.CLIProviderID {
 			s.AiProvider = v
 		}
 	}
@@ -1096,6 +1114,16 @@ func applySettingsUpdate(s *models.Settings, req map[string]interface{}, enc *ut
 		s.AiModel = &v
 		if v == "" {
 			s.AiModel = nil
+		}
+	}
+	if v, ok := getReqString(req, "ai_cli_preset", "aiCliPreset"); ok {
+		s.AiCLIPreset = v
+	}
+	if v, ok := getReqStringOrEmpty(req, "ai_cli_command", "aiCliCommand"); ok {
+		if v == "" {
+			s.AiCLICommand = nil
+		} else {
+			s.AiCLICommand = &v
 		}
 	}
 	if v, ok := getReqString(req, "ai_api_key", "aiApiKey"); ok && v != "" {

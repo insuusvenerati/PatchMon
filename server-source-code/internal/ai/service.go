@@ -2,6 +2,7 @@ package ai
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -76,6 +77,11 @@ var providers = map[string]struct {
 			{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro"},
 		},
 		defaultModel: "gemini-2.5-flash-lite",
+	},
+	// Local CLI is a provider with no hosted models and no API key: the request
+	// is handed to a locally installed CLI agent (see cli.go).
+	CLIProviderID: {
+		name: "Local CLI",
 	},
 }
 
@@ -191,16 +197,25 @@ type callOptions struct {
 	temperature float64
 }
 
-// GetAssistance returns AI assistance for terminal questions.
-func (s *Service) GetAssistance(settings *models.Settings, question, context string, history []Message) (string, error) {
+// GetAssistance returns AI assistance for terminal questions. When the
+// provider is a local CLI, the request is executed as a local subprocess.
+func (s *Service) GetAssistance(ctx context.Context, settings *models.Settings, question, context string, history []Message) (string, error) {
+	if IsCLIProvider(settings.AiProvider) {
+		return s.callCLI(ctx, settings, systemPromptAssistant, question, context, history)
+	}
 	return s.callAI(settings, question, &callOptions{
 		maxTokens:   1024,
 		temperature: 0.7,
 	}, systemPromptAssistant, context, history)
 }
 
-// GetCompletion returns a command completion suggestion.
+// GetCompletion returns a command completion suggestion. Local CLI providers do
+// not support completion: an agentic CLI is far too slow for per-keystroke use,
+// so an empty completion is returned.
 func (s *Service) GetCompletion(settings *models.Settings, input, context string) (string, error) {
+	if IsCLIProvider(settings.AiProvider) {
+		return "", nil
+	}
 	if len(strings.TrimSpace(input)) < 2 {
 		return "", nil
 	}

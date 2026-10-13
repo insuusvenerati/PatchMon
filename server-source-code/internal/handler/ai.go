@@ -56,7 +56,10 @@ func (h *AIHandler) checkRateLimit(ctx context.Context, userID string) bool {
 // GetProviders returns available AI providers and models.
 func (h *AIHandler) GetProviders(w http.ResponseWriter, r *http.Request) {
 	providers := h.aiSvc.GetProviders()
-	JSON(w, http.StatusOK, map[string]interface{}{"providers": providers})
+	JSON(w, http.StatusOK, map[string]interface{}{
+		"providers":   providers,
+		"cli_presets": ai.GetCLIPresets(),
+	})
 }
 
 // GetSettings returns AI settings (admin only).
@@ -64,11 +67,15 @@ func (h *AIHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
 	s, err := h.settings.GetFirst(r.Context())
 	if err != nil {
 		JSON(w, http.StatusOK, map[string]interface{}{
-			"ai_enabled":         false,
-			"ai_provider":        "openrouter",
-			"ai_model":           nil,
-			"ai_api_key_set":     false,
-			"ai_api_key_invalid": false,
+			"ai_enabled":               false,
+			"ai_provider":              "openrouter",
+			"ai_model":                 nil,
+			"ai_api_key_set":           false,
+			"ai_api_key_invalid":       false,
+			"ai_cli_preset":            "codex",
+			"ai_cli_command":           nil,
+			"ai_cli_command_set":       false,
+			"ai_cli_command_effective": "",
 		})
 		return
 	}
@@ -91,25 +98,37 @@ func (h *AIHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	JSON(w, http.StatusOK, map[string]interface{}{
-		"ai_enabled":         s.AiEnabled,
-		"ai_provider":        s.AiProvider,
-		"ai_model":           aiModel,
-		"ai_api_key_set":     apiKeyValid,
-		"ai_api_key_invalid": apiKeyInvalid,
+		"ai_enabled":               s.AiEnabled,
+		"ai_provider":              s.AiProvider,
+		"ai_model":                 aiModel,
+		"ai_api_key_set":           apiKeyValid,
+		"ai_api_key_invalid":       apiKeyInvalid,
+		"ai_cli_preset":            s.AiCLIPreset,
+		"ai_cli_command":           s.AiCLICommand,
+		"ai_cli_command_set":       ai.CLIConfigured(s),
+		"ai_cli_command_effective": ai.ResolveCLICommand(s),
 	})
 }
 
 // UpdateSettingsRequest is the body for PUT /ai/settings.
 type UpdateSettingsRequest struct {
-	AiEnabled  *bool   `json:"ai_enabled"`
-	AiProvider *string `json:"ai_provider"`
-	AiModel    *string `json:"ai_model"`
-	AiAPIKey   *string `json:"ai_api_key"`
+	AiEnabled    *bool   `json:"ai_enabled"`
+	AiProvider   *string `json:"ai_provider"`
+	AiModel      *string `json:"ai_model"`
+	AiAPIKey     *string `json:"ai_api_key"`
+	AiCLIPreset  *string `json:"ai_cli_preset"`
+	AiCLICommand *string `json:"ai_cli_command"`
 }
 
 var allowedProviders = map[string]bool{
 	"openrouter": true, "anthropic": true, "openai": true, "gemini": true,
+	ai.CLIProviderID: true,
 }
+
+const (
+	maxCLICommandLen = 1000
+	maxCLIPresetLen  = 64
+)
 
 // UpdateSettings updates AI settings (admin only).
 func (h *AIHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
@@ -149,6 +168,26 @@ func (h *AIHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			s.AiAPIKey = &encrypted
 		}
 	}
+	if req.AiCLIPreset != nil {
+		preset := strings.TrimSpace(*req.AiCLIPreset)
+		if len(preset) > maxCLIPresetLen {
+			Error(w, http.StatusBadRequest, "Local CLI preset is invalid")
+			return
+		}
+		s.AiCLIPreset = preset
+	}
+	if req.AiCLICommand != nil {
+		command := strings.TrimSpace(*req.AiCLICommand)
+		if len(command) > maxCLICommandLen {
+			Error(w, http.StatusBadRequest, "Local CLI command is too long")
+			return
+		}
+		if command == "" {
+			s.AiCLICommand = nil
+		} else {
+			s.AiCLICommand = &command
+		}
+	}
 
 	if err := h.settings.Update(r.Context(), s); err != nil {
 		Error(w, http.StatusInternalServerError, "Failed to update settings")
@@ -157,11 +196,15 @@ func (h *AIHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	apiKeySet := s.AiAPIKey != nil && *s.AiAPIKey != ""
 	JSON(w, http.StatusOK, map[string]interface{}{
-		"message":        "AI settings updated successfully",
-		"ai_enabled":     s.AiEnabled,
-		"ai_provider":    s.AiProvider,
-		"ai_model":       s.AiModel,
-		"ai_api_key_set": apiKeySet,
+		"message":                  "AI settings updated successfully",
+		"ai_enabled":               s.AiEnabled,
+		"ai_provider":              s.AiProvider,
+		"ai_model":                 s.AiModel,
+		"ai_api_key_set":           apiKeySet,
+		"ai_cli_preset":            s.AiCLIPreset,
+		"ai_cli_command":           s.AiCLICommand,
+		"ai_cli_command_set":       ai.CLIConfigured(s),
+		"ai_cli_command_effective": ai.ResolveCLICommand(s),
 	})
 }
 
@@ -214,12 +257,12 @@ func (h *AIHandler) TestConnection(w http.ResponseWriter, r *http.Request) {
 		Error(w, http.StatusInternalServerError, "Failed to load settings")
 		return
 	}
-	if s.AiAPIKey == nil || *s.AiAPIKey == "" {
+	if !ai.IsCLIProvider(s.AiProvider) && (s.AiAPIKey == nil || *s.AiAPIKey == "") {
 		Error(w, http.StatusBadRequest, "AI API key not configured")
 		return
 	}
 
-	response, err := h.aiSvc.GetAssistance(s, "Respond with exactly: 'Connection successful!' - nothing else.", "", nil)
+	response, err := h.aiSvc.GetAssistance(r.Context(), s, "Respond with exactly: 'Connection successful!' - nothing else.", "", nil)
 	if err != nil {
 		Error(w, http.StatusBadRequest, "Connection test failed: "+err.Error())
 		return
@@ -260,7 +303,7 @@ func (h *AIHandler) Assist(w http.ResponseWriter, r *http.Request) {
 		Error(w, http.StatusBadRequest, "AI assistant is not enabled")
 		return
 	}
-	if s.AiAPIKey == nil || *s.AiAPIKey == "" {
+	if !ai.IsCLIProvider(s.AiProvider) && (s.AiAPIKey == nil || *s.AiAPIKey == "") {
 		Error(w, http.StatusBadRequest, "AI API key not configured")
 		return
 	}
@@ -301,7 +344,7 @@ func (h *AIHandler) Assist(w http.ResponseWriter, r *http.Request) {
 		sanitized = append(sanitized, ai.Message{Role: role, Content: content})
 	}
 
-	response, err := h.aiSvc.GetAssistance(s, req.Question, req.Context, sanitized)
+	response, err := h.aiSvc.GetAssistance(r.Context(), s, req.Question, req.Context, sanitized)
 	if err != nil {
 		Error(w, http.StatusInternalServerError, "AI request failed: "+err.Error())
 		return
@@ -330,6 +373,11 @@ func (h *AIHandler) Complete(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.AiEnabled {
 		Error(w, http.StatusBadRequest, "AI assistant is not enabled")
+		return
+	}
+	if ai.IsCLIProvider(s.AiProvider) {
+		// Local CLI agents are too slow for per-keystroke completion.
+		JSON(w, http.StatusOK, map[string]interface{}{"completion": ""})
 		return
 	}
 	if s.AiAPIKey == nil || *s.AiAPIKey == "" {

@@ -77,6 +77,11 @@ func TestResolveModel(t *testing.T) {
 
 func TestProviderDefaultsAreListedAndNotRetired(t *testing.T) {
 	for id, cfg := range providers {
+		if len(cfg.models) == 0 {
+			// Providers without a hosted model catalogue (for example the local
+			// CLI provider) have no default-model invariant to check.
+			continue
+		}
 		if retiredModels[id][cfg.defaultModel] {
 			t.Errorf("%s default %q is retired", id, cfg.defaultModel)
 		}

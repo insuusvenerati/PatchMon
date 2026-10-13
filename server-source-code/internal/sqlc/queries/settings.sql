@@ -63,8 +63,10 @@ UPDATE settings SET
     compliance_scan_interval = $57,
     package_cache_refresh_mode = $58,
     package_cache_refresh_max_age = $59,
-    oidc_trust_unverified_email = $60
-WHERE id = $61;
+    oidc_trust_unverified_email = $60,
+    ai_cli_preset = $61,
+    ai_cli_command = $62
+WHERE id = $63;
 
 -- name: UpdateSettingsConfig :exec
 UPDATE settings SET
